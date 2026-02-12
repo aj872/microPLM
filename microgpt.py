@@ -1,9 +1,9 @@
 """
-The most atomic way to train and inference a GPT in pure, dependency-free Python.
-This file is the complete algorithm.
-Everything else is just efficiency.
+A tiny protein language model: train and inference a GPT on amino acid sequences
+in pure, dependency-free Python. Adapted from Karpathy's microgpt for protein sequences.
+This file is the complete algorithm. Everything else is just efficiency.
 
-@karpathy
+Based on @karpathy's microgpt, adapted for protein sequence generation.
 """
 
 import os       # os.path.exists
@@ -11,20 +11,63 @@ import math     # math.log, math.exp
 import random   # random.seed, random.choices, random.gauss, random.shuffle
 random.seed(42) # Let there be order among chaos
 
-# Let there be an input dataset `docs`: list[str] of documents (e.g. a dataset of names)
-if not os.path.exists('input.txt'):
-    import urllib.request
-    names_url = 'https://raw.githubusercontent.com/karpathy/makemore/refs/heads/master/names.txt'
-    urllib.request.urlretrieve(names_url, 'input.txt')
-docs = [l.strip() for l in open('input.txt').read().strip().split('\n') if l.strip()] # list[str] of documents
+# Let there be an input dataset `docs`: list[str] of protein sequences
+STANDARD_AAS = set('ACDEFGHIKLMNPQRSTVWY')
+if not os.path.exists('proteins.txt'):
+    import urllib.request, gzip, shutil
+    fasta_gz = 'uniprot_sprot.fasta.gz'
+    fasta = 'uniprot_sprot.fasta'
+    if not os.path.exists(fasta):
+        if not os.path.exists(fasta_gz):
+            url = 'https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/complete/uniprot_sprot.fasta.gz'
+            print(f"downloading Swiss-Prot (~90MB compressed)...")
+            def _progress(block_num, block_size, total_size):
+                downloaded = block_num * block_size
+                if total_size > 0:
+                    pct = min(100, downloaded * 100 // total_size)
+                    mb = downloaded / (1024 * 1024)
+                    print(f"\r  {mb:.1f} MB / {total_size/(1024*1024):.1f} MB ({pct}%)", end="", flush=True)
+            urllib.request.urlretrieve(url, fasta_gz, _progress)
+            print()  # newline after progress
+        print("decompressing...")
+        with gzip.open(fasta_gz, 'rb') as f_in, open(fasta, 'wb') as f_out:
+            shutil.copyfileobj(f_in, f_out)
+    # Parse FASTA, keep only short sequences with standard amino acids
+    print("parsing FASTA and filtering short proteins (<=60 AA)...")
+    docs = []
+    current_seq = []
+    n_total = 0
+    for line in open(fasta):
+        if line.startswith('>'):
+            n_total += 1
+            if n_total % 100000 == 0:
+                print(f"  scanned {n_total} entries, kept {len(docs)} so far...", flush=True)
+            if current_seq:
+                seq = ''.join(current_seq)
+                if 10 < len(seq) <= 60 and all(c in STANDARD_AAS for c in seq):
+                    docs.append(seq)
+                current_seq = []
+        else:
+            current_seq.append(line.strip())
+    if current_seq:
+        seq = ''.join(current_seq)
+        if 10 < len(seq) <= 60 and all(c in STANDARD_AAS for c in seq):
+            docs.append(seq)
+    print(f"  done! scanned {n_total} total entries, kept {len(docs)} short proteins")
+    with open('proteins.txt', 'w') as f:
+        for seq in docs:
+            f.write(seq + '\n')
+    print(f"wrote {len(docs)} sequences to proteins.txt")
+else:
+    docs = [l.strip() for l in open('proteins.txt') if l.strip()]
 random.shuffle(docs)
-print(f"num docs: {len(docs)}")
+print(f"num proteins: {len(docs)}")
 
 # Let there be a Tokenizer to translate strings to discrete symbols and back
-uchars = sorted(set(''.join(docs))) # unique characters in the dataset become token ids 0..n-1
+uchars = sorted(set(''.join(docs))) # unique amino acids in the dataset
 BOS = len(uchars) # token id for the special Beginning of Sequence (BOS) token
 vocab_size = len(uchars) + 1 # total number of unique tokens, +1 is for BOS
-print(f"vocab size: {vocab_size}")
+print(f"vocab size: {vocab_size} ({''.join(uchars)})")
 
 # Let there be Autograd, to recursively apply the chain rule through a computation graph
 class Value:
@@ -72,10 +115,10 @@ class Value:
                 child.grad += local_grad * v.grad
 
 # Initialize the parameters, to store the knowledge of the model.
-n_embd = 16     # embedding dimension
-n_head = 4      # number of attention heads
+n_embd = 32     # embedding dimension
+n_head = 4      # number of attention heads (32 / 4 = 8 dim per head)
 n_layer = 1     # number of layers
-block_size = 16 # maximum sequence length
+block_size = 64  # maximum sequence length (short proteins/peptides)
 head_dim = n_embd // n_head # dimension of each head
 matrix = lambda nout, nin, std=0.08: [[Value(random.gauss(0, std)) for _ in range(nin)] for _ in range(nout)]
 state_dict = {'wte': matrix(vocab_size, n_embd), 'wpe': matrix(block_size, n_embd), 'lm_head': matrix(vocab_size, n_embd)}
@@ -149,7 +192,9 @@ m = [0.0] * len(params) # first moment buffer
 v = [0.0] * len(params) # second moment buffer
 
 # Repeat in sequence
+import time
 num_steps = 1000 # number of training steps
+t_start = time.time()
 for step in range(num_steps):
 
     # Take single document, tokenize it, surround it with BOS special token on both sides
@@ -181,11 +226,14 @@ for step in range(num_steps):
         p.data -= lr_t * m_hat / (v_hat ** 0.5 + eps_adam)
         p.grad = 0
 
-    print(f"step {step+1:4d} / {num_steps:4d} | loss {loss.data:.4f}")
+    elapsed = time.time() - t_start
+    avg = elapsed / (step + 1)
+    eta = avg * (num_steps - step - 1)
+    print(f"step {step+1:4d} / {num_steps:4d} | loss {loss.data:.4f} | {avg:.1f}s/step | ETA {eta/60:.1f}min")
 
 # Inference: may the model babble back to us
 temperature = 0.5 # in (0, 1], control the "creativity" of generated text, low to high
-print("\n--- inference (new, hallucinated names) ---")
+print("\n--- inference (new, hallucinated proteins) ---")
 for sample_idx in range(20):
     keys, values = [[] for _ in range(n_layer)], [[] for _ in range(n_layer)]
     token_id = BOS
