@@ -2,7 +2,7 @@
 
 Inspired by [Karpathy's microGPT](https://github.com/karpathy/microGPT), ported to proteins instead of names.
 
-The core architecture (GPT with autograd, attention, RMSNorm, Adam) is unchanged — which is kind of the cool part.
+The core architecture (GPT with autograd, attention, RMSNorm, Adam) is unchanged 
 
 ## Key changes from the original
 
